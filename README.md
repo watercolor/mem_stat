@@ -10,7 +10,6 @@ A simple memory alloc and free statics library
    > **export LD_PRELOAD_64="/lib64/libmmstat.so"**
 
 4. then start you bin, the libmmstat.so will replace default malloc and free automatically.
-
 5. or you can not jump step3,4, manually run bin with PRELOAD prefix, likes:
 
    > **LD_PRELOAD="/lib64/libmmstat.so" LD_PRELOAD_64="/lib64/libmmstat.so" /you/program**
