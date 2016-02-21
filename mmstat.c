@@ -249,7 +249,7 @@ void MemStatNodeAdd(MALLOC_HEADER *pMh, LIST_HEAD_S *head, MemInfoNode* pstMemIn
     MemInfoNode *node_in_list;
     pstMemInfoNode->total_mem = pMh->total_len;
     pstMemInfoNode->counter = pMh->count;
-    mem_parse_symbol(pMh->alloc_by[0], pstMemInfoNode->func_name, sizeof(pstMemInfoNode->func_name));
+    pstMemInfoNode->alloc_func = pMh->alloc_by[0];
 
     SSP_LIST_FOR_EACH_ENTRY(node_in_list, head, stList, MemInfoNode) {
         if(pstMemInfoNode->total_mem >= node_in_list->total_mem) {
@@ -267,13 +267,16 @@ void MemStatNodeAdd(MALLOC_HEADER *pMh, LIST_HEAD_S *head, MemInfoNode* pstMemIn
 void MemStatPrint(LIST_HEAD_S *head, void* para,  print_func_t pf_print)
 {
     MemInfoNode *node;
+    char func_name[128];
     pf_print(para, "%56s  %12s  %12s  %12s    %s\n",
             "AllocFunc", "Total(MB)", "Total(KB)", "Total(B)", "AllocCount");
     pf_print(para, "========================================================="
             "=========================================================\n");
     SSP_LIST_FOR_EACH_ENTRY(node, head, stList, MemInfoNode) {
+        func_name[0] = '\0';
+        mem_parse_symbol(node->alloc_func, func_name, sizeof(func_name));
         pf_print(para, "%56s  %12d  %12d  %12d    %d\n",
-                node->func_name,
+                func_name,
                 node->total_mem >> 20,
                 node->total_mem >> 10,
                 node->total_mem,
@@ -312,7 +315,7 @@ int print_mem_stat(void *para, print_func_t pf_print)
     unsigned long total_malloc_count = 0;
     unsigned long total_malloc_memory = 0;
     unsigned long walk_node_num = 0;
-    memstat_hashtable = (HLIST_HEAD_S*)malloc(sizeof(HLIST_HEAD_S) * HASH_BUCKET_SIZE);
+    memstat_hashtable = (HLIST_HEAD_S*)real_malloc(sizeof(HLIST_HEAD_S) * HASH_BUCKET_SIZE);
     if(memstat_hashtable == NULL) {
         return 0;
     }
@@ -356,11 +359,10 @@ int print_mem_stat(void *para, print_func_t pf_print)
             SSP_HlistAddHead(&pMh->stHNode, hlist_head);
         }
     }
-    spin_unlock();
 
-    pstMemInfoNode = (MemInfoNode*)malloc(sizeof(MemInfoNode) * mem_info_node_no);
+    pstMemInfoNode = (MemInfoNode*)real_malloc(sizeof(MemInfoNode) * mem_info_node_no);
     if(pstMemInfoNode == NULL) {
-        free(memstat_hashtable);
+        real_free(memstat_hashtable);
         return 0;
     }
 
@@ -375,6 +377,8 @@ int print_mem_stat(void *para, print_func_t pf_print)
             total_malloc_memory+= pMhHlist->total_len;
         }
     }
+    spin_unlock();
+    
     pf_print(para, "========================================================="
             "=========================================================\n");
     pf_print(para, " %32s : %ld\n", "Total Malloc Function Point", mem_info_node_no);
@@ -384,8 +388,8 @@ int print_mem_stat(void *para, print_func_t pf_print)
             "---------------------------------------------------------\n");
     MemStatPrint(&MemStatInfoList, para, pf_print);
 
-    free(pstMemInfoNode);
-    free(memstat_hashtable);
+    real_free(pstMemInfoNode);
+    real_free(memstat_hashtable);
     return 0;
 }
 

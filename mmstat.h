@@ -93,6 +93,7 @@ typedef int (*print_func_t)(void*, const char *format, ...);
 typedef struct {
     LIST_HEAD_S stList;
     char func_name[128];
+    void* alloc_func;
     int total_mem;
     int counter;
 } MemInfoNode;
