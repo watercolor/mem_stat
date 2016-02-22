@@ -32,6 +32,7 @@ static size_t memory_limit = 1024L * 1024L * 1024L * 2L;
 static bool is_initializing;
 
 log_level_e curent_log_level = LOG_ERROR;
+FILE *g_memdbg_fp;
 
 static void init(void) {
     char *ram_limit;
@@ -122,6 +123,368 @@ void *calloc(size_t nmemb, size_t size) {
     }
 }
 
+static const char __HEX[] = "0123456789abcdef";
+static char *__safe_utoa(int _base, uint64_t val, char *buf)
+{
+    uint32_t base = (uint32_t) _base;
+    *buf-- = 0;
+    do {
+        *buf-- = __HEX[val % base];
+    } while ((val /= base) != 0);
+    return buf + 1;
+}
+
+static char *__safe_itoa(int base, int64_t val, char *buf)
+{
+    char *orig_buf = buf;
+    const int32_t is_neg = (val < 0);
+    *buf-- = 0;
+
+    if (is_neg) {
+        val = -val;
+    }
+    if (is_neg && base == 16) {
+        int ix;
+        val -= 1;
+        for (ix = 0; ix < 16; ++ix)
+            buf[-ix] = '0';
+    }
+
+    do {
+        *buf-- = __HEX[val % base];
+    } while ((val /= base) != 0);
+
+    if (is_neg && base == 10) {
+        *buf-- = '-';
+    }
+
+    if (is_neg && base == 16) {
+        int ix;
+        buf = orig_buf - 1;
+        for (ix = 0; ix < 16; ++ix, --buf) {
+            /* *INDENT-OFF* */
+            switch (*buf) {
+            case '0': *buf = 'f'; break;
+            case '1': *buf = 'e'; break;
+            case '2': *buf = 'd'; break;
+            case '3': *buf = 'c'; break;
+            case '4': *buf = 'b'; break;
+            case '5': *buf = 'a'; break;
+            case '6': *buf = '9'; break;
+            case '7': *buf = '8'; break;
+            case '8': *buf = '7'; break;
+            case '9': *buf = '6'; break;
+            case 'a': *buf = '5'; break;
+            case 'b': *buf = '4'; break;
+            case 'c': *buf = '3'; break;
+            case 'd': *buf = '2'; break;
+            case 'e': *buf = '1'; break;
+            case 'f': *buf = '0'; break;
+            }
+            /* *INDENT-ON* */
+        }
+    }
+    return buf + 1;
+}
+
+static const char *__safe_check_longlong(const char *fmt, int32_t * have_longlong)
+{
+    *have_longlong = false;
+    if (*fmt == 'l') {
+        fmt++;
+        if (*fmt != 'l') {
+            *have_longlong = (sizeof(long) == sizeof(int64_t));
+        } else {
+            fmt++;
+            *have_longlong = true;
+        }
+    }
+    return fmt;
+}
+
+static int __safe_vsnprintf(char *to, size_t size, const char *format, va_list ap)
+{
+    char *start = to;
+    char *end = start + size - 1;
+    for (; *format; ++format) {
+        int32_t have_longlong = false;
+        unsigned char zero;
+        uint32_t width = 0;
+        int32_t left_align = 0;
+        if (*format != '%') {
+            if (to == end) {    /* end of buffer */
+                break;
+            }
+            *to++ = *format;    /* copy ordinary char */
+            continue;
+        }
+        ++format;               /* skip '%' */
+
+        if(*format == '-') {
+            format++;
+            left_align = 1;
+        }
+
+        /* judge 0 with number like prefix*/
+        zero = (unsigned char) (((*format == '0') && (left_align == 0))? '0' : ' ');
+        while (*format >= '0' && *format <= '9') {
+            width = width * 10 + *format++ - '0';
+        }
+
+        format = __safe_check_longlong(format, &have_longlong);
+
+        switch (*format) {
+        case 'd':
+        case 'i':
+        case 'u':
+        case 'x':
+        case 'p':
+            {
+                int64_t ival = 0;
+                uint64_t uval = 0;
+                if (*format == 'p')
+                    have_longlong = (sizeof(void *) == sizeof(uint64_t));
+                if (have_longlong) {
+                    if (*format == 'u') {
+                        uval = va_arg(ap, uint64_t);
+                    } else {
+                        ival = va_arg(ap, int64_t);
+                    }
+                } else {
+                    if (*format == 'u') {
+                        uval = va_arg(ap, uint32_t);
+                    } else {
+                        ival = va_arg(ap, int32_t);
+                    }
+                }
+
+                {
+                    char buff[22];
+                    uint32_t len;
+                    const int base = (*format == 'x' || *format == 'p') ? 16 : 10;
+
+		            /* *INDENT-OFF* */
+                    char *val_as_str = (*format == 'u') ?
+                        __safe_utoa(base, uval, &buff[sizeof(buff) - 1]) :
+                        __safe_itoa(base, ival, &buff[sizeof(buff) - 1]);
+		            /* *INDENT-ON* */
+
+                    /* Strip off "ffffffff" if we have 'x' format without 'll' */
+                    if (*format == 'x' && !have_longlong && ival < 0) {
+                        val_as_str += 8;
+                    }
+
+                    /* gen 0 prefix */
+                    len = &buff[sizeof(buff) - 1] - val_as_str;
+
+                    if(left_align == 0) {
+                        while (len++ < width && to < end) {
+                            *to++ = zero;
+                        }
+                    }
+                    while (*val_as_str && to < end) {
+                        *to++ = *val_as_str++;
+                    }
+
+                    if(left_align) {
+                        while (len++ < width && to < end) {
+                            *to++ = zero;
+                        }
+                    }
+                    continue;
+                }
+            }
+        case 'c':
+            {
+                int32_t ival = va_arg(ap, int32_t);
+                *to++ = (unsigned char) (ival & 0xff);
+                continue;
+            }
+        case 's':
+            {
+                const char *val = va_arg(ap, char *);
+                if (!val) {
+                    val = "(null)";
+                }
+                while (*val && to < end) {
+                    *to++ = *val++;
+                }
+                continue;
+            }
+        }
+    }
+    *to = 0;
+    return (int)(to - start);
+}
+
+static int __safe_snprintf(char *to, size_t n, const char *fmt, ...)
+{
+    int result;
+    va_list args;
+    va_start(args, fmt);
+    result = __safe_vsnprintf(to, n, fmt, args);
+    va_end(args);
+    return result;
+}
+
+static void mem_dumpstack_to_fp(void *fp, pfprint_t pfprint)
+{
+#define SYSCALL_ADDRESS  0xfffffff010UL
+#define BUFFER_SIZE  8192
+    void *array[64] = {0};
+    size_t size;
+    size_t i = 0;
+    int pipe_fd[2];
+    char *stackbuffer;
+    ssize_t readlen;
+    char* printline;
+    int jumpline = 0;
+    
+    size = backtrace (array, 64);
+    if(size == 0) {
+        return;
+    }
+    for (i = 0; i < size; i++) {
+        if((unsigned long)array[i] == SYSCALL_ADDRESS) {
+            i += 1;
+            jumpline = i;
+            break;
+        }
+    }
+    if(i == size) {
+        i = 0;
+    }
+    
+    pipe(pipe_fd);
+    stackbuffer = (char*)alloca(BUFFER_SIZE);
+    backtrace_symbols_fd (&array, size, pipe_fd[1]);
+    readlen = read(pipe_fd[0], stackbuffer, BUFFER_SIZE);
+    if(readlen < 0) {
+        pfprint (fp, "backtrace_symbols_fd error, errno:%d, reason:%s\n", errno, strerror(errno));
+        return;
+    }
+    if(readlen == 0) {
+        pfprint (fp, "backtrace_symbols_fd read length return 0. fd0: %d, fd1: %d\n", 
+            errno, strerror(errno), pipe_fd[0], pipe_fd[1]);
+        return;
+    }
+    
+    pfprint (fp, "\ndumped thread call funtion stack frames:\n"
+        "--------------------------------------------------------------------------------\n");
+    
+    printline = stackbuffer;
+    /* jump first n signal call */
+    while(jumpline > 0){
+        char* enter_pos = strchr(printline, '\n');
+        printline = enter_pos + 1;
+        jumpline--;
+    }
+    
+    for (; i < size; i++) {
+        char* left_brace;
+        char* newline = strchr(printline, '\n');
+
+        if(newline) {
+            *newline = '\0';
+        }
+        left_brace = strchr(printline, '(');
+        if((left_brace == NULL && strchr(printline, '['))
+            || (left_brace && *(left_brace+1) == ')')) 
+        {
+            /* try to parse static symbol */
+            char *left_brace2 = strchr(printline, '[');
+            if(left_brace2) {
+                unsigned long addr;
+                int n = sscanf(left_brace2, "[0x%lx]", &addr);
+                if(n == 1) {
+                    char buffer[256];
+                    buffer[0] = '\0';
+                    __safe_snprintf(buffer, left_brace2 - printline + 1, "%s", printline);
+                    pfprint (fp, "%s", buffer);
+                    mem_parse_symbol((void*)addr, buffer, 256);
+                    pfprint (fp, "(%s)", buffer);
+                    pfprint (fp, " %s\n", left_brace2);
+                }
+            } else {
+                pfprint (fp, "%s\n", printline);
+            }
+        } else {
+            pfprint (fp, "%s\n", printline);
+        }
+        printline = newline + 1;
+    }
+}
+
+static int mem_log(const char *fmt, ...)
+{
+    int result;
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    result = __safe_vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+        
+    if(g_memdbg_fp == NULL) {
+        int fd = open(filename, O_RDWR|O_CREAT|O_NONBLOCK, 0644);
+        g_memdbg_fp = fdopen(fd, "a+");
+        if(g_memdbg_fp == NULL) {
+            return result;
+        }
+    }
+    fprintf(g_memdbg_fp, "%s\n", buffer);
+    return result;
+}
+
+void mem_log_destroyer(MALLOC_HEADER* pheader)
+{
+    char buffer[1024];
+    mem_parse_symbol(pheader->alloc_by[0], buffer, sizeof(buffer));
+    mem_log("Malloc func: 0x%p(%s), pointer: 0x%p, length: %d\n", 
+            pheader->alloc_by[0], buffer, pheader->data, pheader->memlen);
+    mem_dumpstack_to_fp(g_memdbg_fp, fprintf);
+}
+
+#define HEAD_SEARCH_RANGE  (2 << 20)
+#define TAIL_SEARCH_RANGE  (1 << 20)
+int pointer_check(void* ptr)
+{
+    MALLOC_HEADER *pheader = (MALLOC_HEADER*)((unsigned long)ptr - sizeof(MALLOC_HEADER));
+    MALLOC_TAIL *ptail = (MALLOC_TAIL *)((unsigned long)pheader + sizeof(MALLOC_HEADER) + pheader->memlen);
+    if(pheader->magic_head == MALLOC_MAGIC_HEAD) {
+        if(ptail->magic_tail == MALLOC_MAGIC_TAIL) {
+            /* header and tail all match, ok */
+            return 1;
+        } else {
+            /* header match, tail not match, overlap memory after this region */
+            mem_log("Detect memory overlapped(0x%p). this memory overlaped memory after this region.\n", ptr);
+            mem_log_destroyer(pheader);
+            return 0;
+        }
+    } else {
+        /* this block is overlapped by region before */
+        if(ptail->magic_tail == MALLOC_MAGIC_TAIL) {
+            mem_log("Detect memory overlapped(0x%p). this memory is overlaped by memory before this region.\n", ptr);
+            uint32_t limit = HEAD_SEARCH_RANGE;
+            uint32_t idx = 0;
+            void* search_pointer = ((unsigned long)pheader - limit) & ((unsigned long)(-8));
+            for(idx = 0; idx < limit; idx += sizeof(void*)) {
+                MALLOC_HEADER *pheader = (MALLOC_HEADER*)(search_pointer + idx);
+                if (pheader->magic_head == MALLOC_MAGIC_HEAD) {
+                    mem_log("Find memory destroyer.\n");
+                    mem_log_destroyer(pheader);
+                    return 0;
+                } else {
+                    continue;
+                }
+            }
+            mem_log("Cann't find memory destroyer before 1M size.\n");
+        } else {
+            /* header and tail all not match, may be totally destroyed or free a not valid pointer */
+            mem_log("Memory header and tailer all not match.maybe free a not valid pointer(0x%p).\n", );
+        }
+    }
+}
+
 void free(void *ptr) {
     MALLOC_HEADER *p = (MALLOC_HEADER*)((unsigned long)ptr - sizeof(MALLOC_HEADER));
     if (is_initializing) {
@@ -197,10 +560,10 @@ static int mem_parse_symbol(void *addr, char* buffer, int buflen)
             size_t i;
             char *default_path[] = {
                 "./libsymbol.so",
-                "/lib/libsymbol.so",
-                "/usr/lib/libsymbol.so",
                 "/lib64/libsymbol.so",
+                "/lib/libsymbol.so",
                 "/usr/lib64/libsymbol.so", 
+                "/usr/lib/libsymbol.so",
             };
             for(i = 0; i < (sizeof(default_path) / sizeof(default_path[0])); i++) {
                 handle = dlopen(default_path[i], RTLD_LAZY);
@@ -395,28 +758,28 @@ int print_mem_stat(void *para, print_func_t pf_print)
 
 void dump_meminfo_to_file(void* filename)
 {
-    FILE *fp = NULL;
+    //FILE *fp = NULL;
     time_t now;
     char asctime_str[256];
     char* pos;
-    int fd;
     
-    fd = open(filename, O_RDWR|O_CREAT|O_NONBLOCK, 0644);
-    fp = fdopen(fd, "a+");
-    if(fp == NULL) {
-        return;
+    if(g_memdbg_fp == NULL) {
+        int fd = open(filename, O_RDWR|O_CREAT|O_NONBLOCK, 0644);
+        g_memdbg_fp = fdopen(fd, "a+");
+        if(g_memdbg_fp == NULL) {
+            return;
+        }
     }
-    
     now = time(NULL);
     ctime_r(&now, asctime_str);
     pos = strchr(asctime_str, '\n');
     if(pos) {
         *pos = '\0';
     }
-    fprintf(fp, "=====================================================\n");
-    fprintf(fp, "Memory Dump time: %s\n", asctime_str);
-    fprintf(fp, "=====================================================\n");
-    print_mem_stat(fp, (print_func_t)fprintf);
-    fclose(fp);
+    fprintf(g_memdbg_fp, "=====================================================\n");
+    fprintf(g_memdbg_fp, "Memory Dump time: %s\n", asctime_str);
+    fprintf(g_memdbg_fp, "=====================================================\n");
+    print_mem_stat(g_memdbg_fp, (print_func_t)fprintf);
+    //fclose(fp);
     return;
 }
